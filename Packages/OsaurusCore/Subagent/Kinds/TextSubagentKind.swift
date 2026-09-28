@@ -1428,7 +1428,11 @@ final class TextSubagentKind:
             names = autoChildToolNames(capabilities: caps)
         }
         guard !names.isEmpty else { return [] }
-        return ToolRegistry.shared.specsForSpawnedOperations(forTools: names)
+        return ToolRegistry.shared.specsForSpawnedOperations(
+            forTools: names.filter {
+                ToolRegistry.shared.isDynamicToolGranted($0, agentId: agentId)
+            }
+        )
     }
 
     /// The tool NAMES an auto-surface (nil-allowlist) agent's child may
