@@ -1294,22 +1294,22 @@ final class CapabilitiesLoadTool: OsaurusTool, @unchecked Sendable {
         }
         // A loaded schema is not a permanent grant. Match dispatch before
         // claiming that a previously loaded dynamic tool is still callable.
-        let dynamicallyGranted = await MainActor.run {
-            ToolRegistry.shared.isDynamicToolGranted(
-                toolId, agentId: ChatExecutionContext.currentAgentId
-            )
-        }
-        guard dynamicallyGranted else {
-            return .failure(
-                LoadFailure(
-                    kind: .rejected,
-                    message: "Tool '\(toolId)' is not available in this conversation."
-                )
-            )
-        }
-        // Preserve idempotency for currently granted tools and the dedicated
-        // built-in policy below; never rebuffer an already-loaded schema.
+        // Preserve first-load diagnostics and dedicated built-in policy below.
         if await isAlreadyLoadedInSession(toolId) {
+            let dynamicallyGranted = await MainActor.run {
+                ToolRegistry.shared.isDynamicToolGranted(
+                    toolId, agentId: ChatExecutionContext.currentAgentId
+                )
+            }
+            guard dynamicallyGranted else {
+                return .failure(
+                    LoadFailure(
+                        kind: .rejected,
+                        message: "Tool '\(toolId)' is not available in this conversation."
+                    )
+                )
+            }
+            // Never rebuffer an already-loaded schema.
             return .success("Tool '\(toolId)' is already loaded and callable — no action needed.\n")
         }
         // Built-ins are not dynamic capabilities. If the composer withheld one
