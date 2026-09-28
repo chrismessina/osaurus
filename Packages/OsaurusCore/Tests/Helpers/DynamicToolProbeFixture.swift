@@ -46,27 +46,43 @@ final class DynamicToolProbeFixture {
 
     static func run(_ body: @MainActor @Sendable (DynamicToolProbeFixture) async throws -> Void) async throws {
         try await StoragePathsTestLock.shared.run {
-            try await DynamicCatalogTestLock.shared.run {
-                let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-                let previousDirectory = ToolConfigurationStore.overrideDirectory
-                let approvalKey = ToolApprovalSettings.autoAllowAllDefaultsKey
-                let previousApproval = UserDefaults.standard.object(forKey: approvalKey)
-                ToolConfigurationStore.flushPendingWrites()
-                ToolConfigurationStore.overrideDirectory = directory
-                let fixture = DynamicToolProbeFixture()
-                defer {
-                    fixture.restore()
-                    if let previousApproval {
-                        UserDefaults.standard.set(previousApproval, forKey: approvalKey)
-                    } else {
-                        UserDefaults.standard.removeObject(forKey: approvalKey)
-                    }
-                    ToolConfigurationStore.flushPendingWrites()
-                    ToolConfigurationStore.overrideDirectory = previousDirectory
-                    try? FileManager.default.removeItem(at: directory)
+            try await withCatalogLock(body)
+        }
+    }
+
+    /// For probes that also touch sandbox/host-folder state, preserve the
+    /// canonical Storage → Sandbox → Dynamic ordering without recursive locks.
+    static func runWithSandbox(
+        _ body: @MainActor @Sendable (DynamicToolProbeFixture) async throws -> Void
+    ) async throws {
+        try await SandboxTestLock.runWithStoragePaths {
+            try await withCatalogLock(body)
+        }
+    }
+
+    private static func withCatalogLock(
+        _ body: @MainActor @Sendable (DynamicToolProbeFixture) async throws -> Void
+    ) async throws {
+        try await DynamicCatalogTestLock.shared.run {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            let previousDirectory = ToolConfigurationStore.overrideDirectory
+            let approvalKey = ToolApprovalSettings.autoAllowAllDefaultsKey
+            let previousApproval = UserDefaults.standard.object(forKey: approvalKey)
+            ToolConfigurationStore.flushPendingWrites()
+            ToolConfigurationStore.overrideDirectory = directory
+            let fixture = DynamicToolProbeFixture()
+            defer {
+                fixture.restore()
+                if let previousApproval {
+                    UserDefaults.standard.set(previousApproval, forKey: approvalKey)
+                } else {
+                    UserDefaults.standard.removeObject(forKey: approvalKey)
                 }
-                try await body(fixture)
+                ToolConfigurationStore.flushPendingWrites()
+                ToolConfigurationStore.overrideDirectory = previousDirectory
+                try? FileManager.default.removeItem(at: directory)
             }
+            try await body(fixture)
         }
     }
 }
