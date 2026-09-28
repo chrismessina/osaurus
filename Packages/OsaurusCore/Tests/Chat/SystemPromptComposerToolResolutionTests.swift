@@ -416,77 +416,81 @@ struct SystemPromptComposerToolResolutionTests {
     @Test("Disabling web or all tools refuses a stale native dynamic scope")
     func nativeFeatureRevocationRefusesStaleScope() async {
         await withSandboxAgent(autonomous: false) { agentId in
-            let registry = ToolRegistry.shared
-            guard var agent = AgentManager.shared.agent(for: agentId) else {
-                Issue.record("Missing fixture agent")
-                return
-            }
-            agent.settings.webSearchEnabled = true
-            AgentManager.shared.update(agent)
-            let scope = ToolExecutionScope(exposed: registry.specs(forTools: ["search_and_extract"]))
-            #expect(registry.isDynamicToolGranted("search_and_extract", agentId: agentId))
-            agent.settings.webSearchEnabled = false
-            AgentManager.shared.update(agent)
-            #expect(!registry.isDynamicToolGranted("search_and_extract", agentId: agentId))
-            await ChatExecutionContext.$currentAgentId.withValue(agentId) {
-                await ChatExecutionContext.$toolExecutionScope.withValue(scope) {
-                    do {
-                        // Malformed args guarantee this never performs network
-                        // work even if a regression bypasses the grant check.
-                        let result = try await registry.execute(name: "search_and_extract", argumentsJSON: "{")
-                        #expect(result.contains("not available"))
-                    } catch { Issue.record("Unexpected native gate error: \(error)") }
+            await DynamicCatalogTestLock.shared.run {
+                let registry = ToolRegistry.shared
+                guard var agent = AgentManager.shared.agent(for: agentId) else {
+                    Issue.record("Missing fixture agent")
+                    return
                 }
+                agent.settings.webSearchEnabled = true
+                AgentManager.shared.update(agent)
+                let scope = ToolExecutionScope(exposed: registry.specs(forTools: ["search_and_extract"]))
+                #expect(registry.isDynamicToolGranted("search_and_extract", agentId: agentId))
+                agent.settings.webSearchEnabled = false
+                AgentManager.shared.update(agent)
+                #expect(!registry.isDynamicToolGranted("search_and_extract", agentId: agentId))
+                await ChatExecutionContext.$currentAgentId.withValue(agentId) {
+                    await ChatExecutionContext.$toolExecutionScope.withValue(scope) {
+                        do {
+                            // Malformed args guarantee this never performs network
+                            // work even if a regression bypasses the grant check.
+                            let result = try await registry.execute(name: "search_and_extract", argumentsJSON: "{")
+                            #expect(result.contains("not available"))
+                        } catch { Issue.record("Unexpected native gate error: \(error)") }
+                    }
+                }
+                // An explicit pick remains a separate grant; all-tools OFF wins.
+                AgentManager.shared.updateEnabledToolNames(["search_and_extract"], for: agentId)
+                #expect(registry.isDynamicToolGranted("search_and_extract", agentId: agentId))
+                guard var latest = AgentManager.shared.agent(for: agentId) else { return }
+                latest.toolsEnabled = false
+                AgentManager.shared.update(latest)
+                #expect(!registry.isDynamicToolGranted("search_and_extract", agentId: agentId))
             }
-            // An explicit pick remains a separate grant; all-tools OFF wins.
-            AgentManager.shared.updateEnabledToolNames(["search_and_extract"], for: agentId)
-            #expect(registry.isDynamicToolGranted("search_and_extract", agentId: agentId))
-            guard var latest = AgentManager.shared.agent(for: agentId) else { return }
-            latest.toolsEnabled = false
-            AgentManager.shared.update(latest)
-            #expect(!registry.isDynamicToolGranted("search_and_extract", agentId: agentId))
         }
     }
 
     @Test("Charts and web edits refresh frozen baseline names in both directions")
     func capabilityTogglesRefreshFrozenBaseline() async {
         await withSandboxAgent(autonomous: false) { agentId in
-            let store = SessionToolStateStore()
-            let registry = ToolRegistry.shared
-            for enabled in [false, true, false] {
-                guard var agent = AgentManager.shared.agent(for: agentId) else {
-                    Issue.record("Missing fixture agent")
-                    return
+            await DynamicCatalogTestLock.shared.run {
+                let store = SessionToolStateStore()
+                let registry = ToolRegistry.shared
+                for enabled in [false, true, false] {
+                    guard var agent = AgentManager.shared.agent(for: agentId) else {
+                        Issue.record("Missing fixture agent")
+                        return
+                    }
+                    agent.settings.renderChartEnabled = enabled
+                    agent.settings.webSearchEnabled = enabled
+                    AgentManager.shared.update(agent)
+                    await store.reconcileToolGrants("caps", current: registry.toolGrantSnapshot(agentId: agentId))
+                    let state = await store.get("caps")
+                    let context = await SystemPromptComposer.composeChatContext(
+                        agentId: agentId,
+                        executionMode: .none,
+                        model: "gpt-5",
+                        frozenAlwaysLoadedNames: state?.initialAlwaysLoadedNames,
+                        frozenToolSpecs: state?.initialToolSpecs,
+                        frozenManifest: state?.frozenManifest
+                    )
+                    let names = Set(context.tools.map(\.function.name))
+                    #expect(names.contains("render_chart") == enabled)
+                    #expect(names.contains("web_search") == enabled)
+                    #expect(names.contains("search_and_extract") == enabled)
+                    await store.setInitial(
+                        "caps",
+                        alwaysLoadedNames: context.alwaysLoadedNames,
+                        toolSpecs: context.initialToolSpecs,
+                        manifest: context.enabledManifest
+                    )
                 }
-                agent.settings.renderChartEnabled = enabled
-                agent.settings.webSearchEnabled = enabled
-                AgentManager.shared.update(agent)
-                await store.reconcileToolGrants("caps", current: registry.toolGrantSnapshot(agentId: agentId))
-                let state = await store.get("caps")
-                let context = await SystemPromptComposer.composeChatContext(
-                    agentId: agentId,
-                    executionMode: .none,
-                    model: "gpt-5",
-                    frozenAlwaysLoadedNames: state?.initialAlwaysLoadedNames,
-                    frozenToolSpecs: state?.initialToolSpecs,
-                    frozenManifest: state?.frozenManifest
-                )
-                let names = Set(context.tools.map(\.function.name))
-                #expect(names.contains("render_chart") == enabled)
-                #expect(names.contains("web_search") == enabled)
-                #expect(names.contains("search_and_extract") == enabled)
-                await store.setInitial(
-                    "caps",
-                    alwaysLoadedNames: context.alwaysLoadedNames,
-                    toolSpecs: context.initialToolSpecs,
-                    manifest: context.enabledManifest
-                )
+                let caps = AgentManager.shared.effectiveCapabilities(for: agentId)
+                var unrelated = caps
+                unrelated.memoryEnabled.toggle()
+                unrelated.screenContextEnabled.toggle()
+                #expect(caps.toolExposureIdentity == unrelated.toolExposureIdentity)
             }
-            let caps = AgentManager.shared.effectiveCapabilities(for: agentId)
-            var unrelated = caps
-            unrelated.memoryEnabled.toggle()
-            unrelated.screenContextEnabled.toggle()
-            #expect(caps.toolExposureIdentity == unrelated.toolExposureIdentity)
         }
     }
 

@@ -49,6 +49,43 @@ struct ToolRegistryTimeoutTests {
         }
     }
 
+    @Test
+    func cancelledUntimedAuthorizationNeverStartsTool() async throws {
+        let gate = AuthorizationGate()
+        let counter = ExecutionCounter()
+        let task = Task {
+            try await ToolRegistry.runToolBodyUntimed(
+                CountedAuthorizationTool(counter: counter),
+                argumentsJSON: "{}",
+                authorizeBody: {
+                    await withTaskCancellationHandler {
+                        await gate.wait()
+                    } onCancel: {
+                        Task { await gate.release() }
+                    }
+                    return nil
+                }
+            )
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(4))
+        while !(await gate.entered), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard await gate.entered else {
+            task.cancel()
+            await gate.release()
+            _ = try await task.value
+            Issue.record("Untimed authorization callback did not start within its bounded wait")
+            return
+        }
+        task.cancel()
+        await gate.release()
+        let result = try await task.value
+        #expect(ToolEnvelope.isError(result))
+        #expect(result.contains("cancelled"))
+        #expect(await counter.count == 0)
+    }
+
     @Test(arguments: [false, true])
     func cancelledOrTimedOutAuthorizationNeverStartsTool(timeout: Bool) async throws {
         let gate = AuthorizationGate()
